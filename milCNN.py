@@ -350,7 +350,9 @@ def run_network(model, total_hid, train_bags, test_bags, y_bags):
             tmp_size = len(training)
             #pdb.set_trace()
             #ys = np.array(tmp_size *[y]) # make the labels in the bag all have the same labels, maybe not correct?
-            ys = y*np.ones((4,))   #  I do not understand the correspondence of ys and tarining, need to confirm
+            ys = np.zeros((tmp_size,2))
+            ys[:, y] = 1  # binary class ############################################################################### one hot encoding
+            # ys = y*np.ones((4,))   #  I do not understand the correspondence of ys and tarining, need to confirm  ####
             model.fit(training, ys, batch_size = tmp_size, epochs=1, verbose = 0)
         model.reset_states()
             #ys = np_utils.to_categorical(ys)
