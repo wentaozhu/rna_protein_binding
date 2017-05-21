@@ -8,11 +8,10 @@ from keras.layers.merge import Concatenate
 from keras.layers.normalization import BatchNormalization
 from keras.layers.advanced_activations import PReLU, LeakyReLU
 from keras.optimizers import SGD, RMSprop, Adadelta, Adagrad, Adam
-from keras.layers import normalization
-from keras.layers.convolutional import Convolution2D, MaxPooling2D
+from keras.layers import normalization, Lambda, GlobalMaxPooling2D
 from keras.layers import LSTM, Bidirectional, Reshape
 from keras.layers.embeddings import Embedding
-from keras.layers.convolutional import Convolution2D, MaxPooling2D,Conv1D, MaxPooling1D
+from keras.layers.convolutional import Conv2D, MaxPooling2D,Conv1D, MaxPooling1D
 from keras.callbacks import ModelCheckpoint, EarlyStopping
 from customlayers import Recalc, ReRank, ExtractDim, SoftReRank, ActivityRegularizerOneDim, RecalcExpand, Softmax4D
 from keras.constraints import maxnorm
@@ -26,13 +25,13 @@ _EPSILON = K.epsilon()
 import random
 import gzip
 import pickle
-import tensorflow as tf
-os.environ["CUDA_VISIBLE_DEVICES"]="1"
-from keras import backend as K
-config = tf.ConfigProto()
-config.gpu_options.allow_growth=True
-sess = tf.Session(config=config)
-K.set_session(sess)
+# import tensorflow as tf
+# os.environ["CUDA_VISIBLE_DEVICES"]="1"
+# from keras import backend as K
+# config = tf.ConfigProto()
+# config.gpu_options.allow_growth=True
+# sess = tf.Session(config=config)
+# K.set_session(sess)
 def padding_sequence_new(seq, max_len = 101, repkey = 'N'):
     seq_len = len(seq)
     new_seq = seq
@@ -229,6 +228,7 @@ def get_bag_data(data):
     bags = []
     seqs = data["seq"]
     labels = data["Y"]
+    longlen = 0
     for seq in seqs:
         #pdb.set_trace()
         bag_seqs = split_overlap_seq(seq)
@@ -237,21 +237,18 @@ def get_bag_data(data):
         for bag_seq in bag_seqs:
             tri_fea = get_RNA_concolutional_array(bag_seq)
             bag_subt.append(tri_fea)
-        '''
-        if len(bag_subt) >5:
-            bag_subt = bag_subt[:5]
-        if len(bag_subt) <5:
-            rand_more = 5 - len(bag_subt)
-            for ind in range(rand_more):
-                bag_subt.append(random.choice(bag_subt))
-        '''
-        bags.append(np.array(bag_subt))
-    
-        
-    return bags, labels
-    #for data in pairs.iteritems():
-    #    ind1 = trids.index(key)
-    #    emd_weight1 = embedding_rna_weights[ord_dict[str(ind1)]]
+        data = np.array(bag_subt)
+        if longlen < data.shape[0]:
+            longlen = data.shape[0]
+        # print(data.shape, type(data.shape))
+        bags.append(data) #np.reshape(data, [1]+list(data.shape)))
+    padbags = []
+    for data in bags:
+        paddata = np.zeros([longlen]+list(data.shape[1:]))
+        paddata[:data.shape[0], :, :] = np.array(data)
+        paddata = np.reshape(paddata, [1]+list(paddata.shape))
+        padbags.append(paddata)
+    return padbags, labels # bags,
 
 def mil_squared_error(y_true, y_pred):
     return K.tile(K.square(K.max(y_pred) - K.max(y_true)), 5)
@@ -277,25 +274,20 @@ def custom_objective(y_true, y_pred):
     cce = - (y_true * K.log(y_new+logEps) + (1 - y_true)* K.log(1-y_new + logEps))
     return cce
 
-def set_cnn_model(input_dim = 4, input_length = 107):
+def set_cnn_model(ninstance=4, input_dim = 4, input_length = 107):
     nbfilter = 16
-    model = Sequential()
+    model = Sequential() # #seqs * seqlen * 4
     #model.add(brnn)
-    model.add(Conv1D(input_shape=(input_length, input_dim),
+    model.add(Conv2D(input_shape=(ninstance, input_length, input_dim),
                             filters=nbfilter,
-                            kernel_size=10,
+                            kernel_size=(1,10),
                             padding="valid",
                             #activation="relu",
                             strides=1))
     model.add(Activation('relu'))
-    model.add(MaxPooling1D(pool_size=3)) # 32 16
-    ''' add multi instance learning '''
-    model.add(Conv1D(filters=2, kernel_size=1, padding='valid', strides=1)) # 32 2, 2 is the number of classes
-    model.add(Softmax4D(axis=-1)) # 32 2 
-    model.add(MaxPooling1D(pool_size=32)) # 1 2
-    model.add(Reshape(target_shape=(2,))) # 2
-    model.add(Recalc(axis=-1)) # 2
-    # model.add(ExtractDim())
+    model.add(MaxPooling2D(pool_size=(1,3))) # 32 16
+    # model.add(Dropout(0.25)) # will be better
+    model.add(Conv2D(filters=nbfilter*2, kernel_size=(1,32), padding='valid', activation='relu', strides=1))
     # model.add(Flatten())
     #model.add(Softmax4D(axis=1))
 
@@ -303,12 +295,10 @@ def set_cnn_model(input_dim = 4, input_length = 107):
     #model.add(Flatten())
     #model.add(Recalc(axis=1))
     # model.add(Flatten())
-    # model.add(Dropout(0.5))
     # model.add(Dense(nbfilter*2, activation='relu'))
-    # model.add(Dropout(0.5))
-
+    model.add(Dropout(0.25))
+    model.add(Conv2D(filters=1, kernel_size=(1,1), padding='valid', activation='sigmoid', strides=1))
     return model
-
         
 def get_all_embedding(protein):
     
@@ -322,8 +312,9 @@ def get_all_embedding(protein):
     return train_bags, label, test_bags, true_y
 
 def run_network(model, total_hid, train_bags, test_bags, y_bags):
-    # model.add(Dense(1))
-    # model.add(Activation('softmax'))
+    # model.add(Dense(1)) # binary classification
+    # model.add(Activation('softmax')) # #instance * 2
+    model.add(GlobalMaxPooling2D()) # max pooling multi instance 
 
     model.summary()
     savemodelpng = 'net.png'
@@ -332,7 +323,7 @@ def run_network(model, total_hid, train_bags, test_bags, y_bags):
     #categorical_crossentropy, binary_crossentropy, mil_squared_error
     #sgd = SGD(lr=0.01, decay=1e-6, momentum=0.9, nesterov=True) 
     #model.compile(loss=mil_squared_error, optimizer='rmsprop') 
-    #print 'model training'
+    # print 'model training'
     #nb_epos= 5
     #model.fit(train_bags, y_bags, batch_size = 60, epochs=nb_epos, verbose = 0)
     
@@ -350,10 +341,12 @@ def run_network(model, total_hid, train_bags, test_bags, y_bags):
             tmp_size = len(training)
             #pdb.set_trace()
             #ys = np.array(tmp_size *[y]) # make the labels in the bag all have the same labels, maybe not correct?
-            ys = np.zeros((tmp_size,2))
-            ys[:, y] = 1  # binary class ############################################################################### one hot encoding
+            # ys = np.zeros((tmp_size,2))
+            # ys[:, y] = 1  # binary class ############################################################################### one hot encoding
             # ys = y*np.ones((4,))   #  I do not understand the correspondence of ys and tarining, need to confirm  ####
-            model.fit(training, ys, batch_size = tmp_size, epochs=1, verbose = 0)
+            # trainingreshap = np.reshape(training, (1, training.shape[0], training.shape[1], training.shape[2]))
+            # print(training.shape, y.shape)
+            model.fit(training, y*np.ones((1,1)), batch_size = tmp_size, epochs=1, verbose = 0)
         model.reset_states()
             #ys = np_utils.to_categorical(ys)
             #model.train_on_batch(training, ys)
@@ -375,7 +368,8 @@ def run_milcnn():
         print protein
         fw.write(protein + '\t')
         train_bags, train_labels, test_bags, test_labels = get_all_embedding(protein)
-        net =  set_cnn_model()
+        print(train_bags[0].shape, train_labels[0])
+        net =  set_cnn_model(ninstance=train_bags[0].shape[1])
         
         #seq_auc, seq_predict = calculate_auc(seq_net)
         hid = 16
